@@ -1,31 +1,79 @@
 import { useEffect, useState } from "react";
-import { api, type AppState } from "./api";
+import { api, ApiError, type AppState } from "./api";
+
+type Action = "load" | "increment" | "decrement" | "reset" | "refresh";
 
 // Seam for Pendo. Novus installs the Pendo agent, which provides window.pendo
 // at runtime; this fires a Track Event for each action. No-op when the agent
 // isn't present (local dev), so the app and Playwright mocks both stay simple.
-function trackEvent(name: string) {
+function trackEvent(name: Action | "action-failed", props?: Record<string, unknown>) {
   if (typeof window !== "undefined") {
-    window.pendo?.track?.(`demo-${name}`);
+    window.pendo?.track?.(`demo-${name}`, props);
   }
 }
+
+// Properties for an action's success event, from the state shown before the
+// action (prev) and the state the API returned (next).
+function successProps(name: Action, prev: AppState, next: AppState): Record<string, unknown> {
+  switch (name) {
+    case "load":
+      return { counter: next.counter, lastAction: next.lastAction };
+    case "increment":
+    case "decrement":
+      return { counter: next.counter, previousCounter: prev.counter };
+    case "reset":
+      // The returned counter is always 0, so report what was cleared instead.
+      return { previousCounter: prev.counter, previousLastAction: prev.lastAction };
+    case "refresh":
+      // The server counter is shared by every visitor and tab; counterChanged
+      // shows whether a refresh actually picked up a change made elsewhere.
+      return {
+        counter: next.counter,
+        previousCounter: prev.counter,
+        counterChanged: next.counter !== prev.counter,
+        lastAction: next.lastAction,
+      };
+  }
+}
+
+// Properties for demo-action-failed. ApiError carries the request details;
+// any other error (e.g. a response body that isn't JSON) only has a message.
+function failureProps(name: Action, e: unknown): Record<string, unknown> {
+  const apiError = e instanceof ApiError ? e : undefined;
+  return {
+    action: name,
+    errorMessage: (e instanceof Error ? e.message : String(e)).slice(0, 100),
+    httpStatus: apiError?.status,
+    method: apiError?.method,
+    path: apiError?.path,
+  };
+}
+
+// The startup load is reported once per page view. React StrictMode runs mount
+// effects twice in development; this module-level flag keeps that from sending
+// a second demo-load (or demo-action-failed), matching production builds.
+let startupLoadReported = false;
 
 export default function App() {
   const [state, setState] = useState<AppState>({ counter: 0, lastAction: "none" });
   const [error, setError] = useState<string | null>(null);
 
-  const run = async (name: string, fn: () => Promise<AppState>) => {
+  const run = async (name: Action, fn: () => Promise<AppState>, report = true) => {
     try {
       setError(null);
-      setState(await fn());
-      trackEvent(name);
+      const next = await fn();
+      setState(next);
+      if (report) trackEvent(name, successProps(name, state, next));
     } catch (e) {
       setError((e as Error).message);
+      // A failed action never fires its success event, so report the failure itself.
+      if (report) trackEvent("action-failed", failureProps(name, e));
     }
   };
 
   useEffect(() => {
-    run("load", api.getState);
+    run("load", api.getState, !startupLoadReported);
+    startupLoadReported = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
