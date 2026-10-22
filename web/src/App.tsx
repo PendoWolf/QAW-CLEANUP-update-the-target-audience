@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
-import { api, type AppState } from "./api";
+import { api, ApiError, type AppState } from "./api";
 
 // Seam for Pendo. Novus installs the Pendo agent, which provides window.pendo
 // at runtime; this fires a Track Event for each action. No-op when the agent
 // isn't present (local dev), so the app and Playwright mocks both stay simple.
-function trackEvent(name: string) {
+function trackEvent(name: string, props?: Record<string, unknown>) {
   if (typeof window !== "undefined") {
-    window.pendo?.track?.(`demo-${name}`);
+    window.pendo?.track?.(`demo-${name}`, props);
   }
 }
 
@@ -20,7 +20,15 @@ export default function App() {
       setState(await fn());
       trackEvent(name);
     } catch (e) {
-      setError((e as Error).message);
+      const message = (e as Error).message;
+      setError(message);
+      // Fires "demo-action-failed" when a counter action's request fails (non-OK
+      // HTTP response or network error). status is only set for HTTP failures.
+      trackEvent("action-failed", {
+        action: name,
+        errorMessage: message,
+        status: e instanceof ApiError ? e.status : undefined,
+      });
     }
   };
 
